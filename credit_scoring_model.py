@@ -16,10 +16,11 @@ import seaborn as sns
 
 from sklearn.model_selection import (
     train_test_split, StratifiedKFold,
-    cross_val_score, RandomizedSearchCV
+    cross_val_score
 )
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import (
     accuracy_score, confusion_matrix,
     classification_report, roc_auc_score, RocCurveDisplay
@@ -40,21 +41,32 @@ MODEL_DIR     = os.path.join(BASE_DIR, "model")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 
+# ─────────────────────────────────────────────
+# 1. LOAD DATA
+# ─────────────────────────────────────────────
 def load_data():
     print("\n[Step 1] Loading Dataset")
     try:
         df = pd.read_csv(DATASET_TRAIN, low_memory=False)
-        print(f"  Shape: {df.shape}")
-        print(f"  Columns: {list(df.columns)}")
+        print(f"  Shape   : {df.shape}")
+        print(f"  Columns : {list(df.columns)}")
         return df
     except FileNotFoundError:
         print(f"  ERROR: '{DATASET_TRAIN}' not found.")
         sys.exit(1)
 
 
+# ─────────────────────────────────────────────
+# 2. EXPLORATORY DATA ANALYSIS
+# ─────────────────────────────────────────────
 def eda(df, target_col):
     print("\n[Step 2] EDA")
-    print(f"  Missing values:\n{df.isnull().sum()[df.isnull().sum() > 0]}")
+    missing = df.isnull().sum()
+    missing = missing[missing > 0]
+    if not missing.empty:
+        print(f"  Missing values:\n{missing}")
+    else:
+        print("  No missing values.")
     print(f"  Target distribution:\n{df[target_col].value_counts()}")
 
     numeric_df = df.select_dtypes(include=[np.number])
@@ -83,10 +95,14 @@ def eda(df, target_col):
         print("  Saved → feature_distributions.png")
 
 
+# ─────────────────────────────────────────────
+# 3. PREPROCESSING
+# ─────────────────────────────────────────────
 def preprocess(df, target_col, fit=True,
                label_encoders=None, scaler=None,
                numeric_cols=None, categorical_cols=None,
                feature_cols=None):
+    # Fill missing values
     for col in df.columns:
         if df[col].dtype == "object":
             mode = df[col].mode()
@@ -145,92 +161,185 @@ def preprocess(df, target_col, fit=True,
         return df
 
 
-def train_and_evaluate(X_train, X_test, y_train, y_test, n_classes):
-    print("\n[Step 3] Training & Cross-Validation")
-    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-
-    model = RandomForestClassifier(
-        n_estimators=10, random_state=42, max_depth=10,
-        class_weight="balanced", n_jobs=1
+# ─────────────────────────────────────────────
+# 4. BUILD DEEP NEURAL NETWORK
+# ─────────────────────────────────────────────
+def build_neural_network():
+    """
+    Deep MLP Classifier:
+      - 4 hidden layers: 256 → 128 → 64 → 32 neurons
+      - ReLU activation for non-linearity
+      - Adam optimizer with adaptive learning rate
+      - L2 regularization (alpha) to prevent overfitting
+      - Early stopping: stops if no improvement for 20 epochs
+      - Batch size 64 for stable gradient updates
+    """
+    model = MLPClassifier(
+        hidden_layer_sizes=(256, 128, 64, 32),
+        activation="relu",
+        solver="adam",
+        alpha=0.001,              # L2 regularization
+        learning_rate="adaptive",
+        learning_rate_init=0.001,
+        max_iter=200,
+        batch_size=64,
+        early_stopping=True,
+        validation_fraction=0.1,
+        n_iter_no_change=20,      # patience
+        random_state=42,
+        verbose=False,
     )
-    name = "Random Forest"
+    return model
 
-    print(f"\n  ── {name} ──")
-    cv_scores = cross_val_score(model, X_train, y_train, cv=skf,
-                                 scoring="accuracy", n_jobs=1)
-    print(f"  CV Accuracy : {cv_scores.mean():.4f} +/- {cv_scores.std():.4f}")
 
+# ─────────────────────────────────────────────
+# 5. TRAIN & EVALUATE
+# ─────────────────────────────────────────────
+def train_and_evaluate(X_train, X_test, y_train, y_test, n_classes):
+    print("\n[Step 3] Training Deep Neural Network")
+    print("  Architecture : 256 → 128 → 64 → 32  (ReLU, Adam, Early Stopping)")
+
+    model = build_neural_network()
+
+    # Cross-validation (2-fold for speed on large datasets)
+    skf = StratifiedKFold(n_splits=2, shuffle=True, random_state=42)
+    print("  Running 2-fold cross-validation...")
+    cv_scores = cross_val_score(
+        build_neural_network(), X_train, y_train,
+        cv=skf, scoring="accuracy", n_jobs=-1
+    )
+    print(f"  CV Accuracy : {cv_scores.mean():.4f}  (+/- {cv_scores.std():.4f})")
+
+    # Train final model on full training set
+    print("  Training final model...")
     model.fit(X_train, y_train)
+
+    # Save training loss curve
+    _save_loss_curve(model)
+
     y_pred = model.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
+    acc    = accuracy_score(y_test, y_pred)
 
     try:
-        if hasattr(model, "predict_proba"):
-            proba = model.predict_proba(X_test)
-            if n_classes == 2:
-                roc = roc_auc_score(y_test, proba[:, 1])
-            else:
-                roc = roc_auc_score(y_test, proba, multi_class="ovr", average="macro")
+        proba = model.predict_proba(X_test)
+        if n_classes == 2:
+            roc = roc_auc_score(y_test, proba[:, 1])
         else:
-            roc = float("nan")
+            roc = roc_auc_score(y_test, proba, multi_class="ovr", average="macro")
     except Exception:
         roc = float("nan")
 
-    print(f"  Test Accuracy: {acc:.4f}")
-    print(f"  ROC-AUC      : {roc:.4f}" if not np.isnan(roc) else "  ROC-AUC      : N/A")
-    print(f"  Confusion Matrix:\n{confusion_matrix(y_test, y_pred)}")
-    print(f"  Classification Report:\n{classification_report(y_test, y_pred, zero_division=0)}")
+    print(f"\n  Test Accuracy : {acc:.4f}")
+    print(f"  ROC-AUC       : {roc:.4f}" if not np.isnan(roc) else "  ROC-AUC       : N/A")
+    print(f"\n  Confusion Matrix:\n{confusion_matrix(y_test, y_pred)}")
+    print(f"\n  Classification Report:\n{classification_report(y_test, y_pred, zero_division=0)}")
 
+    name = "Neural Network (MLP)"
     results = {name: {"model": model, "accuracy": acc, "roc_auc": roc, "cv_mean": cv_scores.mean()}}
     return results, name, model, acc
 
 
-def tune_best_model(best_model_name, best_model, X_train, y_train):
-    print(f"\n[Step 4] Tuning: {best_model_name}")
-    param_grid = {
-        "n_estimators":     [10, 20],
-        "max_depth":        [None, 10],
-        "min_samples_split":[2, 10],
-        "min_samples_leaf": [1, 4],
-    }
-
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    search = RandomizedSearchCV(
-        best_model, param_grid,
-        n_iter=2, cv=skf,
-        scoring="accuracy", n_jobs=1,
-        random_state=42, verbose=0
+# ─────────────────────────────────────────────
+# 6. HYPERPARAMETER TUNING
+# ─────────────────────────────────────────────
+def tune_neural_network(model, X_train, y_train):
+    """
+    Train a refined variant with slightly stricter regularisation
+    (alpha=0.005) and smaller learning rate (0.0005) for better
+    generalisation — no expensive grid search needed.
+    """
+    print("\n[Step 4] Refining Neural Network Hyperparameters")
+    refined = MLPClassifier(
+        hidden_layer_sizes=(256, 128, 64, 32),
+        activation="relu",
+        solver="adam",
+        alpha=0.005,              # slightly stronger regularisation
+        learning_rate="adaptive",
+        learning_rate_init=0.0005,
+        max_iter=200,
+        batch_size=64,
+        early_stopping=True,
+        validation_fraction=0.1,
+        n_iter_no_change=20,
+        random_state=42,
+        verbose=False,
     )
-    search.fit(X_train, y_train)
-    print(f"  Best params  : {search.best_params_}")
-    print(f"  Best CV score: {search.best_score_:.4f}")
-    return search.best_estimator_
+    refined.fit(X_train, y_train)
+    print(f"  Refined model trained  (alpha=0.005, lr=0.0005)")
+    return refined
 
 
-def save_feature_importance(model, feature_names, top_n=20):
-    importance = None
-    if hasattr(model, "feature_importances_"):
-        importance = model.feature_importances_
-    elif hasattr(model, "coef_"):
-        importance = np.abs(model.coef_[0]) if model.coef_.ndim > 1 else np.abs(model.coef_)
-
-    if importance is None:
-        return
+# ─────────────────────────────────────────────
+# 7. PERMUTATION FEATURE IMPORTANCE
+# ─────────────────────────────────────────────
+def compute_permutation_importance(model, X_test, y_test, feature_cols, top_n=20):
+    """
+    Neural networks don't have built-in feature_importances_.
+    We use permutation importance: measures how much accuracy drops
+    when each feature's values are shuffled individually.
+    """
+    print("\n  Computing permutation feature importance...")
+    result = permutation_importance(
+        model, X_test, y_test,
+        n_repeats=5, random_state=42, n_jobs=-1,
+        scoring="accuracy"
+    )
+    importances     = result.importances_mean
+    importances_std = result.importances_std
 
     feat_df = pd.DataFrame({
-        "Feature":    feature_names,
-        "Importance": importance
+        "Feature":    feature_cols,
+        "Importance": importances,
+        "Std":        importances_std,
     }).sort_values("Importance", ascending=False).head(top_n)
 
-    plt.figure(figsize=(10, 6))
-    sns.barplot(data=feat_df, x="Importance", y="Feature", palette="viridis")
-    plt.title(f"Top {top_n} Feature Importances")
+    # Save chart
+    plt.figure(figsize=(10, 7))
+    colors = plt.cm.plasma(np.linspace(0.2, 0.85, len(feat_df)))
+    plt.barh(
+        feat_df["Feature"][::-1],
+        feat_df["Importance"][::-1],
+        xerr=feat_df["Std"][::-1],
+        color=colors, edgecolor="none"
+    )
+    plt.xlabel("Mean Accuracy Decrease (Permutation Importance)", fontsize=10)
+    plt.title(f"Top {top_n} Feature Importances — Neural Network", fontsize=12)
     plt.tight_layout()
     plt.savefig("feature_importance.png", dpi=100)
     plt.close()
     print("  Saved → feature_importance.png")
 
+    return importances.tolist()
 
+
+# ─────────────────────────────────────────────
+# 8. LOSS CURVE
+# ─────────────────────────────────────────────
+def _save_loss_curve(model):
+    if hasattr(model, "loss_curve_") and model.loss_curve_:
+        plt.figure(figsize=(9, 4))
+        plt.plot(model.loss_curve_, color="#7b2ff7", linewidth=2, label="Training Loss")
+        if hasattr(model, "validation_scores_") and model.validation_scores_:
+            # validation_scores_ stores accuracy during early-stopping
+            ax2 = plt.gca().twinx()
+            ax2.plot(model.validation_scores_, color="#f107a3",
+                     linewidth=2, linestyle="--", label="Val Accuracy")
+            ax2.set_ylabel("Validation Accuracy", color="#f107a3")
+            ax2.tick_params(axis="y", labelcolor="#f107a3")
+            ax2.legend(loc="upper right")
+        plt.xlabel("Iteration")
+        plt.ylabel("Loss")
+        plt.title("Neural Network Training Loss Curve")
+        plt.gca().legend(loc="upper left")
+        plt.tight_layout()
+        plt.savefig("training_loss_curve.png", dpi=100)
+        plt.close()
+        print("  Saved → training_loss_curve.png")
+
+
+# ─────────────────────────────────────────────
+# 9. ROC CURVE
+# ─────────────────────────────────────────────
 def save_roc_curve(model, X_test, y_test, n_classes):
     if n_classes != 2 or not hasattr(model, "predict_proba"):
         return
@@ -243,14 +352,19 @@ def save_roc_curve(model, X_test, y_test, n_classes):
         print(f"  ROC curve skipped: {e}")
 
 
+# ─────────────────────────────────────────────
+# 10. PREDICT TEST FILE
+# ─────────────────────────────────────────────
 def predict_test_file(model, label_encoders, scaler,
                       numeric_cols, categorical_cols,
                       feature_cols, target_col):
     print("\n[Step 6] Generating Final Predictions on dataset/test.csv")
     try:
         test_df = pd.read_csv(DATASET_TEST, low_memory=False)
-        test_df_ids = test_df[["ID", "Customer_ID"]].copy() if all(
-            c in test_df.columns for c in ["ID", "Customer_ID"]) else test_df.iloc[:, :2].copy()
+        if all(c in test_df.columns for c in ["ID", "Customer_ID"]):
+            test_df_ids = test_df[["ID", "Customer_ID"]].copy()
+        else:
+            test_df_ids = test_df.iloc[:, :2].copy()
 
         X_test_real = preprocess(
             test_df, target_col, fit=False,
@@ -274,17 +388,21 @@ def predict_test_file(model, label_encoders, scaler,
         print(f"  Prediction error: {e}")
 
 
+# MAIN
 def main():
-    print("=" * 60)
-    print("  CodeAlpha Credit Scoring Model  –  Improved Pipeline  ")
-    print("=" * 60)
+    print("=" * 65)
+    print("  CodeAlpha Credit Scoring Model  –  Deep Learning Pipeline  ")
+    print("=" * 65)
 
+   
     df = load_data()
     target_col = df.columns[-1]
     print(f"\n  Target column: '{target_col}'")
 
+  
     eda(df, target_col)
 
+  
     print("\n[Step 3] Preprocessing")
     X, y, label_encoders, scaler, numeric_cols, categorical_cols, feature_cols = preprocess(
         df.copy(), target_col, fit=True
@@ -292,6 +410,7 @@ def main():
     n_classes = y.nunique()
     print(f"  Features : {X.shape[1]}  |  Samples : {X.shape[0]}  |  Classes : {n_classes}")
 
+    
     if SMOTE_AVAILABLE and n_classes >= 2:
         try:
             sm = SMOTE(random_state=42)
@@ -305,50 +424,59 @@ def main():
     )
     print(f"\n  Train: {X_train.shape[0]}  |  Test: {X_test.shape[0]}")
 
+    # ── 4. Train ─────────────────────────────
     results, best_model_name, best_model, best_accuracy = train_and_evaluate(
         X_train, X_test, y_train, y_test, n_classes
     )
 
-    print("\n" + "=" * 60)
-    print(f"  Best Model : {best_model_name}")
-    print(f"  Accuracy   : {best_accuracy:.4f}")
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    print(f"  Model    : {best_model_name}")
+    print(f"  Accuracy : {best_accuracy:.4f}")
+    print("=" * 65)
 
-    tuned_model = tune_best_model(best_model_name, best_model, X_train, y_train)
+    # ── 5. Tune ──────────────────────────────
+    tuned_model = tune_neural_network(best_model, X_train, y_train)
     tuned_pred  = tuned_model.predict(X_test)
     tuned_acc   = accuracy_score(y_test, tuned_pred)
     print(f"\n  Tuned Model Accuracy: {tuned_acc:.4f}")
 
-    final_model = tuned_model if tuned_acc >= best_accuracy else best_model
-    print(f"  Final Model Accuracy: {max(tuned_acc, best_accuracy):.4f}")
+    final_model   = tuned_model if tuned_acc >= best_accuracy else best_model
+    final_accuracy = max(tuned_acc, best_accuracy)
+    print(f"  Final Model Accuracy: {final_accuracy:.4f}")
 
-    print("\n[Step 5] Saving Plots")
-    save_feature_importance(final_model, feature_cols)
+    # ── 6. Feature Importance ────────────────
+    print("\n[Step 5] Saving Plots & Feature Importance")
+    perm_importances = compute_permutation_importance(
+        final_model, X_test, y_test, feature_cols, top_n=20
+    )
     save_roc_curve(final_model, X_test, y_test, n_classes)
 
+    # ── 7. Save Artifacts ────────────────────
     print("\n[Step 5] Saving Model Artifacts")
     joblib.dump(final_model,    os.path.join(MODEL_DIR, "best_model.pkl"))
     joblib.dump(scaler,         os.path.join(MODEL_DIR, "scaler.pkl"))
     joblib.dump(label_encoders, os.path.join(MODEL_DIR, "label_encoders.pkl"))
     joblib.dump({
-        "numeric_cols":     numeric_cols,
-        "categorical_cols": categorical_cols,
-        "feature_cols":     feature_cols,
-        "target_col":       target_col,
-        "n_classes":        n_classes,
-        "best_model_name":  best_model_name,
-        "accuracy":         max(tuned_acc, best_accuracy),
+        "numeric_cols":        numeric_cols,
+        "categorical_cols":    categorical_cols,
+        "feature_cols":        feature_cols,
+        "target_col":          target_col,
+        "n_classes":           n_classes,
+        "best_model_name":     best_model_name,
+        "accuracy":            final_accuracy,
+        "perm_importances":    perm_importances,   # stored for app.py chart
     }, os.path.join(MODEL_DIR, "metadata.pkl"))
-    print(f"  Saved model artifacts to '{MODEL_DIR}/' folder.")
+    print(f"  Saved model artifacts to '{MODEL_DIR}/'")
 
+    # ── 8. Final Predictions ─────────────────
     predict_test_file(
         final_model, label_encoders, scaler,
         numeric_cols, categorical_cols, feature_cols, target_col
     )
 
-    print("\n" + "=" * 60)
-    print("  Pipeline Complete! ✓")
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    print("  Deep Learning Pipeline Complete! ✓")
+    print("=" * 65)
 
 
 if __name__ == "__main__":

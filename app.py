@@ -62,15 +62,21 @@ def get_band_info(label: str):
     return ("⚪", "#888888", "Score predicted.")
 
 def make_importance_chart(top_n=10):
+    """Build feature importance chart using permutation importances stored in metadata."""
     if not ARTIFACTS_LOADED:
         return None
-    importance = None
-    if hasattr(model, "feature_importances_"):
+
+    # Prefer permutation importances saved during neural network training
+    perm_imp = meta.get("perm_importances", None)
+
+    if perm_imp is not None:
+        importance = np.array(perm_imp)
+    elif hasattr(model, "feature_importances_"):
         importance = model.feature_importances_
     elif hasattr(model, "coef_"):
         importance = (np.abs(model.coef_[0])
                       if model.coef_.ndim > 1 else np.abs(model.coef_))
-    if importance is None:
+    else:
         return None
 
     feat_df = pd.DataFrame({
@@ -78,11 +84,11 @@ def make_importance_chart(top_n=10):
         "Importance": importance
     }).sort_values("Importance", ascending=True).tail(top_n)
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(feat_df)))
-    ax.barh(feat_df["Feature"], feat_df["Importance"], color=colors)
-    ax.set_xlabel("Importance Score", fontsize=10)
-    ax.set_title(f"Top {top_n} Feature Importances", fontsize=12)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    colors = plt.cm.plasma(np.linspace(0.2, 0.85, len(feat_df)))
+    ax.barh(feat_df["Feature"], feat_df["Importance"], color=colors, edgecolor="none")
+    ax.set_xlabel("Mean Accuracy Decrease (Permutation Importance)", fontsize=9)
+    ax.set_title(f"Top {top_n} Feature Importances — Neural Network", fontsize=11)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
     return fig
@@ -343,7 +349,7 @@ def build_ui():
 
         gr.HTML("""
         <div style="text-align:center;margin-top:16px;color:#555;font-size:12px;">
-            CodeAlpha Credit Scoring Model &nbsp;|&nbsp; Built with Gradio &amp; scikit-learn
+            CodeAlpha Credit Scoring Model &nbsp;|&nbsp; Deep Learning Neural Network &amp; Gradio
         </div>
         """)
 

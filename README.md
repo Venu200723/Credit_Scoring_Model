@@ -113,7 +113,7 @@ CodeAlpha_Credit_Scoring_Model
 
 ---
 
-## ⚙️ Installation
+##  Installation
 
 Install required libraries:
 
@@ -123,7 +123,7 @@ pip install -r requirements.txt
 
 ---
 
-## ▶️ Run the Project
+##  Run the Project
 
 Run the model using:
 
@@ -133,7 +133,7 @@ python credit_scoring_model.py
 
 ---
 
-## 🛠 Technologies Used
+## Technologies Used
 
 * Python
 * Pandas
@@ -144,7 +144,7 @@ python credit_scoring_model.py
 
 ---
 
-## 👨‍💻 Author
+## Author
 
 **Venu Gopal R**
 B.Tech – Artificial Intelligence & Data Science
